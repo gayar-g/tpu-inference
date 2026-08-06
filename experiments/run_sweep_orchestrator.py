@@ -4,6 +4,8 @@ import argparse
 import os
 import json
 import itertools
+import csv
+from datetime import datetime
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SCRIPT_PATH = os.path.join(BASE_DIR, "tpu_profile_vllm.py")
@@ -13,12 +15,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True, help="Path to YAML config")
     parser.add_argument("--result-dir", default=DEFAULT_RESULT_DIR, help="Base directory for results")
+    parser.add_argument("--experiment-id", default=None, help="Pass to resume sweep from specific ID")
     args = parser.parse_args()
 
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
     
-    model = config.get("model", "google/gemma-4-12b-it")
     tp_size = config.get("tensor_parallel_size", 4)
     dtype = config.get("dtype", "bfloat16")
     max_model_len = config.get("max_model_len", None)
@@ -26,6 +28,10 @@ def main():
     engine_args = config.get("engine_args", {})
     
     sweep = config.get("sweep_matrix", {})
+    
+    if "model" in config and "model" not in sweep:
+        sweep["model"] = [config["model"]]
+        
     trace_configs = config.get("trace_configs", [])
 
     # Backward compatibility mapping for older yaml formats
@@ -63,40 +69,39 @@ def main():
                 print(f"❌ ERROR: Trace config {tc} is invalid. {k}={v} is not in the generated sweep matrix boundaries.")
                 return
 
-    # Clean model directory name and CSV file path
-    model_dir_name = model.replace("/", "--")
-    yaml_stem = os.path.splitext(os.path.basename(args.config))[0]
-    model_result_dir = os.path.join(args.result_dir, model_dir_name)
-    csv_file = os.path.join(model_result_dir, f"{yaml_stem}.csv")
-    os.makedirs(model_result_dir, exist_ok=True)
+    exp_id = args.experiment_id if args.experiment_id else datetime.now().strftime("%Y%m%d_%H%M%S")
+    exp_dir = os.path.join(args.result_dir, exp_id)
+    os.makedirs(exp_dir, exist_ok=True)
     
-    if not os.path.exists(csv_file):
-        with open(csv_file, 'w') as f:
-            f.write("Model,Batch_Size,Input_Len,Output_Len,Duration_s,Throughput_tok_s,Reproduction_Command\n")
+    csv_file = os.path.join(exp_dir, "results.csv")
+    traces_dir = os.path.join(exp_dir, "traces")
+    os.makedirs(traces_dir, exist_ok=True)
+    
+    completed_configs = []
+    if os.path.exists(csv_file):
+        with open(csv_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                completed_configs.append(row)
     
     for combo in cross_product:
         current_config = dict(zip(sweep_keys, combo))
-        b = current_config.get("batch_size", 1)
-        i = current_config.get("input_len", 128)
-        o = current_config.get("output_len", 64)
         
         skip = False
-        if os.path.exists(csv_file):
-            with open(csv_file, 'r') as f:
-                for line in f:
-                    if line.startswith(f"{model},{b},{i},{o},"):
-                        skip = True
-                        break
+        for completed_row in completed_configs:
+            if all(str(completed_row.get(k)) == str(v) for k, v in current_config.items()):
+                skip = True
+                break
                         
         if skip:
-            print(f">>> [SKIPPED] Batch {b} | Input {i} | Output {o} already exists in {csv_file}.")
+            print(f">>> [SKIPPED] Coordinate {current_config} already logged in {csv_file}.")
             continue
             
-        print(f">>> Running Batch {b} | Input {i} | Output {o}")
+        print(f">>> Running iteration: {current_config}")
         cmd = [
             "/mnt/pd/shen/vllm_env/bin/python3", SCRIPT_PATH,
-            "--model", model,
             "--csv-file", csv_file,
+            "--sweep-metadata", json.dumps(current_config),
             "--tensor-parallel-size", str(tp_size),
             "--dtype", dtype,
             "--engine-args", json.dumps(engine_args)
@@ -121,8 +126,8 @@ def main():
                 
             # If everything in canonical_tc matches current_config natively
             if all(current_config.get(k) == v for k, v in canonical_tc.items()):
-                trace_name = "_".join(f"{k}{v}" for k, v in canonical_tc.items())
-                trace_dir = os.path.join(model_result_dir, f"trace_{trace_name}")
+                trace_name = "_".join(f"{k}{v}".replace('/', '-') for k, v in canonical_tc.items())
+                trace_dir = os.path.join(traces_dir, f"trace_{trace_name}")
                 cmd.extend(["--trace", "--profile-result-dir", trace_dir])
                 if "jax_advanced_configuration" in tc:
                     cmd.extend(["--jax-advanced-configuration", json.dumps(tc["jax_advanced_configuration"])])
@@ -138,11 +143,11 @@ def main():
         try:
             subprocess.run(cmd, env=env, check=True)
         except subprocess.CalledProcessError as e:
-            print(f"!!! CRASH DETECTED at Batch {b} | Input {i} | Output {o}. This usually indicates a limits Wall.")
+            print(f"!!! CRASH DETECTED. This usually indicates a limits Wall.")
             print(f"!!! Cleaning TPU locks and safely moving to the next matrix dimension...")
             subprocess.run(["sudo", "rm", "-f", "/tmp/libtpu_lockfile"])
                 
-    print(f"✅ Sweep configuration {args.config} complete! Results written to {csv_file}")
+    print(f"Sweep configuration {args.config} complete! Results written to {csv_file}")
 
 if __name__ == "__main__":
     main()

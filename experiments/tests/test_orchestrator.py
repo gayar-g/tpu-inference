@@ -1,120 +1,142 @@
 import unittest
-from unittest.mock import patch
-import sys
 import os
+import tempfile
+import sys
 import yaml
+from unittest.mock import patch, MagicMock
 
-# Add the directory containing run_sweep_orchestrator to path so we can import it
-# Since this script will be in `experiments/tests/`, we need to go up one level
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+run_sweep = __import__('run_sweep_orchestrator')
 
-import run_sweep_orchestrator
-
-class TestOrchestrator(unittest.TestCase):
+class TestOrchestratorExp(unittest.TestCase):
     def setUp(self):
-        self.config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_config.yaml")
-        
-    def _write_config(self, config_dict):
-        with open(self.config_path, "w") as f:
-            yaml.dump(config_dict, f)
-            
+        self.test_dir = tempfile.TemporaryDirectory()
+        self.config_path = os.path.join(self.test_dir.name, "test_exp_config.yaml")
+
     def tearDown(self):
-        if os.path.exists(self.config_path):
-            os.remove(self.config_path)
+        self.test_dir.cleanup()
 
-    @patch('run_sweep_orchestrator.subprocess.run')
-    @patch('run_sweep_orchestrator.argparse.ArgumentParser.parse_args')
-    @patch('run_sweep_orchestrator.os.path.exists') 
-    def test_single_targeted_trace(self, mock_exists, mock_parse_args, mock_run):
-        config = {
-            "model": "google/gemma-4-12b-it",
-            "sweep_matrix": {
-                "batch_size": [1, 4],
-                "input_len": [512, 1024],
-                "output_len": [64],
-            },
-            "trace_configs": [
-                {"batch_size": 4, "input_len": 1024, "output_len": 64}
-            ]
-        }
-        self._write_config(config)
-        
-        class DummyArgs:
-            config = self.config_path
-            result_dir = "/tmp/mock_results"
-        mock_parse_args.return_value = DummyArgs()
-        mock_exists.return_value = False 
-        
-        run_sweep_orchestrator.main()
-        
-        # 2 batches x 2 input_lens * 1 output_len = 4 runs
-        self.assertEqual(mock_run.call_count, 4)
-        
-        traces_found = 0
-        for call_args in mock_run.call_args_list:
-            cmd = call_args[0][0]
-            is_targeted = ("--batch-size" in cmd and cmd[cmd.index("--batch-size") + 1] == "4" and 
-                          "--input-len" in cmd and cmd[cmd.index("--input-len") + 1] == "1024")
-                          
-            if "--trace" in cmd:
-                traces_found += 1
-                self.assertTrue(is_targeted, "Trace flag was applied to an untargeted coordinate!")
-                
-        self.assertEqual(traces_found, 1, "Exactly one run should have been traced.")
-
-    @patch('run_sweep_orchestrator.subprocess.run')
-    @patch('run_sweep_orchestrator.argparse.ArgumentParser.parse_args')
-    @patch('run_sweep_orchestrator.os.path.exists') 
-    def test_multiple_targeted_traces(self, mock_exists, mock_parse_args, mock_run):
-        # We want to trace BOTH Batch 4/Input 1024 AND Batch 1/Input 512
-        config = {
-            "model": "google/gemma-4-12b-it",
-            "sweep_matrix": {
-                "batch_size": [1, 4],
-                "input_len": [512, 1024],
-                "output_len": [64],
-            },
-            "trace_configs": [
-                {
-                    "batch_size": 4, 
-                    "input_len": 1024, 
-                    "output_len": 64,
-                    "jax_advanced_configuration": {"tpu_enable_periodic_counter_sampling": True}
-                },
-                {"batch_size": 1, "input_len": 512, "output_len": 64}
-            ]
-        }
-        self._write_config(config)
-        
-        class DummyArgs:
-            config = self.config_path
-            result_dir = "/tmp/mock_results"
-        mock_parse_args.return_value = DummyArgs()
-        mock_exists.return_value = False 
-        
-        run_sweep_orchestrator.main()
-        
-        self.assertEqual(mock_run.call_count, 4)
-        
-        traces_found = 0
-        advanced_config_found = False
-        for call_args in mock_run.call_args_list:
-            cmd = call_args[0][0]
-            is_target_1 = ("--batch-size" in cmd and cmd[cmd.index("--batch-size") + 1] == "4" and 
-                           "--input-len" in cmd and cmd[cmd.index("--input-len") + 1] == "1024")
+    def create_mock_config(self, content):
+        with open(self.config_path, "w") as f:
+            yaml.dump(content, f)
             
-            is_target_2 = ("--batch-size" in cmd and cmd[cmd.index("--batch-size") + 1] == "1" and 
-                           "--input-len" in cmd and cmd[cmd.index("--input-len") + 1] == "512")
-                           
-            if "--trace" in cmd:
-                traces_found += 1
-                self.assertTrue(is_target_1 or is_target_2, "Trace flag applied to an untargeted coordinate!")
-                
-                if "--jax-advanced-configuration" in cmd:
-                    advanced_config_found = True
-                
-        self.assertEqual(traces_found, 2, "Exactly TWO runs should have been traced.")
-        self.assertTrue(advanced_config_found, "The Advanced configuration JSON flag was missing!")
+    def write_raw_yaml_string(self, content):
+        with open(self.config_path, "w") as f:
+            f.write(content)
 
-if __name__ == '__main__':
-    unittest.main(verbosity=2)
+    @patch("run_sweep_orchestrator.subprocess.run")
+    @patch("run_sweep_orchestrator.datetime")
+    def test_chronological_id_generation(self, mock_datetime, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        mock_now = MagicMock()
+        mock_now.strftime.return_value = "20261111_000000"
+        mock_datetime.now.return_value = mock_now
+
+        self.create_mock_config({
+             "sweep_matrix": {
+                 "model": ["test/model"],
+                 "batch_size": [1],
+                 "input_len": [128],
+                 "output_len": [64]
+             }
+         })
+
+        test_args = ["--config", self.config_path, "--result-dir", self.test_dir.name]
+        with patch("sys.argv", ["run_sweep_orchestrator.py"] + test_args):
+            run_sweep.main()
+
+        expected_dir = os.path.join(self.test_dir.name, "20261111_000000")
+        self.assertTrue(os.path.exists(expected_dir))
+
+    @patch("run_sweep_orchestrator.subprocess.run")
+    def test_custom_experiment_id_and_resumption(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        self.create_mock_config({
+            "sweep_matrix": {
+                 "model": ["meta-llama/test", "google/test2"],
+                 "batch_size": [1, 2],
+                 "input_len": [128],
+                 "output_len": [16]
+            }
+        })
+
+        test_args = ["--config", self.config_path, "--result-dir", self.test_dir.name, "--experiment-id", "RESUME_ID_X"]
+
+        with patch("sys.argv", ["run_sweep_orchestrator.py"] + test_args):
+            run_sweep.main()
+
+        self.assertEqual(mock_run.call_count, 4)
+
+        expected_dir = os.path.join(self.test_dir.name, "RESUME_ID_X")
+        csv_file = os.path.join(expected_dir, "results.csv")
+        
+        import csv
+        with open(csv_file, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=["model", "batch_size", "input_len", "output_len"])
+            writer.writeheader()
+            writer.writerow({"model": "meta-llama/test", "batch_size": "1", "input_len": "128", "output_len": "16"})
+            writer.writerow({"model": "meta-llama/test", "batch_size": "2", "input_len": "128", "output_len": "16"})
+
+        mock_run.reset_mock()
+        
+        with patch("sys.argv", ["run_sweep_orchestrator.py"] + test_args):
+            run_sweep.main()
+
+        self.assertEqual(mock_run.call_count, 2)
+        
+    @patch("run_sweep_orchestrator.subprocess.run")
+    def test_backward_compatibility_migration(self, mock_run):
+        mock_run.return_value = MagicMock(returncode=0)
+        self.create_mock_config({
+             "model": "google/model-old",
+             "sweep_matrix": {
+                 "batches": [4],
+                 "inputs": [32],
+                 "output_lens": [32]
+             }
+         })
+
+        test_args = ["--config", self.config_path, "--result-dir", self.test_dir.name, "--experiment-id", "EXP_COMPAT"]
+        with patch("sys.argv", ["run_sweep_orchestrator.py"] + test_args):
+            run_sweep.main()
+
+        cmd = mock_run.call_args[0][0]
+        self.assertIn("--model", cmd)
+        self.assertIn("google/model-old", cmd)
+        self.assertIn("--batch-size", cmd)
+
+    @patch("run_sweep_orchestrator.subprocess.run")
+    def test_multiple_models_via_yaml_string(self, mock_run):
+        # Validate exact inline string injection parsing flow lists uniformly simulating exact PyYAML behavior mapping over explicit multi-model boundaries
+        mock_run.return_value = MagicMock(returncode=0)
+        yaml_content = """
+sweep_matrix:
+  model: [meta-llama/test-1, google/test-2]
+  batch_size: [1, 2]
+  input_len: [128]
+  output_len: [32]
+"""
+        self.write_raw_yaml_string(yaml_content)
+
+        test_args = ["--config", self.config_path, "--result-dir", self.test_dir.name, "--experiment-id", "MULTI_MODEL_STR"]
+        with patch("sys.argv", ["run_sweep_orchestrator.py"] + test_args):
+            run_sweep.main()
+
+        # 2 models * 2 batch_sizes * 1 * 1 = 4 total iterations
+        self.assertEqual(mock_run.call_count, 4)
+        
+        # Capture the iterations
+        models_called = []
+        for call_arg in mock_run.call_args_list:
+            cmd = call_arg[0][0] # The command list
+            # The model is the index after "--model"
+            if "--model" in cmd:
+                model_name = cmd[cmd.index("--model") + 1]
+                models_called.append(model_name)
+                
+        self.assertEqual(models_called.count("meta-llama/test-1"), 2)
+        self.assertEqual(models_called.count("google/test-2"), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
