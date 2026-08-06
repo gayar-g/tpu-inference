@@ -35,12 +35,16 @@ def main(args):
     _ = llm.generate(dummy_prompts, sampling_params)
 
     if args.trace:
-        options = jax.profiler.ProfileOptions(
-            host_tracer_level=2,
-            device_tracer_level=1,
-        )
+        options = jax.profiler.ProfileOptions()
+        options.host_tracer_level = 2
+        options.device_tracer_level = 1
+        
+        adv_config = json.loads(args.jax_advanced_configuration)
+        if adv_config:
+            options.advanced_configuration = adv_config
+            
         print(f"Starting JAX profiling trace to {base_dir}...")
-        jax.profiler.start_trace(base_dir, options=options)
+        jax.profiler.start_trace(base_dir, profiler_options=options)
 
     start_time = time.perf_counter()
     outputs = llm.generate(dummy_prompts, sampling_params)
@@ -69,7 +73,7 @@ def main(args):
     with open(csv_file, mode="a") as f:
         if not file_exists:
             f.write("Model,Batch_Size,Input_Len,Output_Len,Duration_s,Throughput_tok_s,Reproduction_Command\n")
-        cmd_str = f"/mnt/pd/shen/baseline_v2/tpu_profile_vllm.py --model {args.model} --input-len {args.input_len} --output-len {args.output_len} --batch-size {args.batch_size} --csv-file {csv_file}"
+        cmd_str = f"python3 tpu_profile_vllm.py --model {args.model} --input-len {args.input_len} --output-len {args.output_len} --batch-size {args.batch_size} --csv-file {csv_file}"
         f.write(f"{args.model},{args.batch_size},{args.input_len},{args.output_len},{duration:.4f},{throughput:.2f},\"{cmd_str}\"\n")
 
     print(f"Wrote metrics to {csv_file}")
@@ -84,8 +88,9 @@ if __name__ == "__main__":
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--dtype", type=str, default="bfloat16")
     parser.add_argument("--trace", action="store_true")
-    parser.add_argument("--profile-result-dir", type=str, default="/mnt/pd/shen/baseline_v2/results")
+    parser.add_argument("--profile-result-dir", type=str, default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"))
     parser.add_argument("--csv-file", type=str, default=None, help="Explicit path to target CSV file")
     parser.add_argument("--engine-args", type=str, default="{}", help="JSON string of extra kwargs for LLM()")
+    parser.add_argument("--jax-advanced-configuration", type=str, default="{}", help="Stringified JSON array explicitly overriding profile configuration")
     args = parser.parse_args()
     main(args)
