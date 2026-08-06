@@ -14,3 +14,33 @@ This orchestrator tests both pure generation endpoints and sequence decodes acro
 - Avoids cross-run OOM fragmentation by cleanly isolating TPU processes per test.
 - Automatically handles TPU lockfiles and XLA graph compilation overlaps.
 - Skips previously completed operations if crash recovery is needed.
+
+## Quickstart Guide
+
+**1. Create a Matrix Configuration**
+Create a YAML file in `configs/` explicitly defining your sweep boundaries.
+```yaml
+sweep_matrix:
+  model: [meta-llama/Meta-Llama-3.1-8B-Instruct]
+  batch_size: [1, 2, 4, 8]
+  input_len: [1024]
+  output_len: [128]
+```
+
+**2. Launch the Orchestrator**
+Run the sweep via the central master script passing your config:
+```bash
+python3 run_sweep_orchestrator.py --config configs/my_experiment.yaml
+```
+
+**3. Analyze Chronological Results**
+Your metrics will be routed into a newly timestamped output block seamlessly capturing boundaries over all combinations!
+```bash
+cat results/20261111_001020/results.csv
+```
+
+**4. Resume an Interrupted Experiment**
+If an execution crashed (e.g. HBM bounds hit), explicitly pass `--experiment-id` routing backward into identical coordinates safely explicitly bypassing logged metrics smoothly:
+```bash
+python3 run_sweep_orchestrator.py --config configs/my_experiment.yaml --experiment-id 20261111_001020
+```
