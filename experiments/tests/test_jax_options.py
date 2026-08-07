@@ -1,9 +1,17 @@
+"""Tests that JAX performance counters are correctly parsed and passed.
+
+This file verifies that tracing settings defined in YAML configurations are 
+successfully passed through CLI arguments to the benchmark script without 
+corrupting data types like integers and booleans.
+"""
 import yaml
 import json
 import unittest
 
 class TestJaxOptionsParsing(unittest.TestCase):
+    """Test suite validating the CLI integration and nested serialization of JAX configurations."""
     def test_yaml_to_python_dictionary_fidelity(self):
+        """Verifies that nested YAML dictionaries are recursively preserved when passed as CLI string arguments."""
         # We simulate the exact YAML block we will introduce to the configs
         yaml_content = """
         trace_configs:
