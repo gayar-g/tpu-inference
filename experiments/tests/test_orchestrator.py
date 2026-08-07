@@ -1,3 +1,9 @@
+"""Tests the core functionality of the parameter sweep orchestrator.
+
+This file verifies that the orchestrator correctly handles grid searches across 
+multiple parameters (like batch sizes and models). It also tests that it 
+correctly generates output folders and can resume interrupted sweeps safely.
+"""
 import unittest
 import os
 import tempfile
@@ -9,24 +15,30 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 run_sweep = __import__('run_sweep_orchestrator')
 
 class TestOrchestratorExp(unittest.TestCase):
+    """Test suite validating the CLI integration and loop behavior of run_sweep_orchestrator."""
     def setUp(self):
+        """Creates a temporary workspace and config path for isolated execution."""
         self.test_dir = tempfile.TemporaryDirectory()
         self.config_path = os.path.join(self.test_dir.name, "test_exp_config.yaml")
 
     def tearDown(self):
+        """Cleans up the temporary directory post-test to prevent state leakage."""
         self.test_dir.cleanup()
 
     def create_mock_config(self, content):
+        """Helper to serialize a Python dictionary into a mock YAML config file."""
         with open(self.config_path, "w") as f:
             yaml.dump(content, f)
             
     def write_raw_yaml_string(self, content):
+        """Helper to write a raw string directly to the mock configuration path."""
         with open(self.config_path, "w") as f:
             f.write(content)
 
     @patch("run_sweep_orchestrator.subprocess.run")
     @patch("run_sweep_orchestrator.datetime")
     def test_chronological_id_generation(self, mock_datetime, mock_run):
+        """Verifies the orchestrator automatically generates a timestamped experiment ID if none is provided."""
         mock_run.return_value = MagicMock(returncode=0)
         mock_now = MagicMock()
         mock_now.strftime.return_value = "20261111_000000"
@@ -50,6 +62,7 @@ class TestOrchestratorExp(unittest.TestCase):
 
     @patch("run_sweep_orchestrator.subprocess.run")
     def test_custom_experiment_id_and_resumption(self, mock_run):
+        """Verifies that providing an experiment ID resumes interrupted runs by bypassing configurations already saved in the CSV."""
         mock_run.return_value = MagicMock(returncode=0)
         self.create_mock_config({
             "sweep_matrix": {
@@ -86,6 +99,7 @@ class TestOrchestratorExp(unittest.TestCase):
         
     @patch("run_sweep_orchestrator.subprocess.run")
     def test_backward_compatibility_migration(self, mock_run):
+        """Ensures older schema configurations (e.g. batches instead of batch_size) are safely migrated."""
         mock_run.return_value = MagicMock(returncode=0)
         self.create_mock_config({
              "model": "google/model-old",
@@ -107,6 +121,7 @@ class TestOrchestratorExp(unittest.TestCase):
 
     @patch("run_sweep_orchestrator.subprocess.run")
     def test_multiple_models_via_yaml_string(self, mock_run):
+        """Verifies that lists composed of multiple models safely iterate across all grid axes."""
         # Validate exact inline string injection parsing flow lists uniformly simulating exact PyYAML behavior mapping over explicit multi-model boundaries
         mock_run.return_value = MagicMock(returncode=0)
         yaml_content = """
