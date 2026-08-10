@@ -8,7 +8,9 @@ max_model_len: 131500
 env_vars:
   VLLM_ENABLE_V1_MULTIPROCESSING: '0'
   VLLM_ALLOW_LONG_MAX_MODEL_LEN: '1'
-engine_args: {}
+engine_args:
+  enable_prefix_caching: false
+
 sweep_matrix:
   output_len: [1]
   batch_size: [1]

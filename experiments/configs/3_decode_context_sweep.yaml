@@ -2,7 +2,8 @@
 # Importance: Tests the incremental cost of generating tokens (throughput) as the 
 # past KV-cache context scales up in size. Identifies the point where memory bandwidth 
 # bottlenecks token generation.
-
+engine_args:
+  enable_prefix_caching: false
 tensor_parallel_size: 4
 dtype: bfloat16
 max_model_len: 131500
