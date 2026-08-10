@@ -11,7 +11,7 @@ import sys
 import yaml
 from unittest.mock import patch, MagicMock
 
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 run_sweep = __import__('run_sweep_orchestrator')
 
 class TestOrchestratorExp(unittest.TestCase):
