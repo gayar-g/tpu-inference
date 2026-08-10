@@ -9,7 +9,6 @@ dtype: bfloat16
 max_model_len: 131500
 env_vars:
   VLLM_ENABLE_V1_MULTIPROCESSING: '0'
-engine_args: {}
 sweep_matrix:
   output_len: [64]
   batch_size: [32]
