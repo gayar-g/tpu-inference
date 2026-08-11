@@ -74,6 +74,29 @@ from tpu_inference.runner.mm_encoder_jit_manager import (
 logger = init_logger(__name__)
 
 
+def prune_model_weights(model: torch.nn.Module, prune_percent: float):
+    """Zeroes out the bottom x percent of all linear layer weight elements by magnitude."""
+    if prune_percent <= 0.0:
+        return
+
+    logger.info(f"Applying magnitude pruning: dropping bottom {prune_percent}% of projection weights.")
+    
+    # Wrap the tensor manipulations inside the torchax environment block
+    with torchax.default_env():
+        for name, param in model.named_parameters():
+            # Check for 'weight' parameters and skip biases/norms
+            if "weight" in name and param.requires_grad is False and param.numel() > 0:
+                abs_tensor = torch.abs(param.data).flatten()
+                k = int(abs_tensor.numel() * (prune_percent / 100.0))
+                if k > 0:
+                    # Find the threshold value at the k-th rank
+                    threshold = torch.kthvalue(abs_tensor, k).values
+                    # Create mask where absolute elements are >= threshold (keeps top elements)
+                    mask = torch.abs(param.data) >= threshold
+                    # In-place zero out the pruned values
+                    param.data.mul_(mask)
+
+
 class _VllmRunner(torch.nn.Module):
 
     def __init__(self, vllm_model: torch.nn.Module):
@@ -249,6 +272,12 @@ class VllmModelWrapper:
         if self.vllm_config.speculative_config and self.vllm_config.speculative_config.method == "eagle3" and not self.is_draft_model:
             set_eagle3_aux_hidden_state_layers(
                 vllm_model, self.vllm_config.speculative_config)
+
+        # ==========================================================
+        # INJECT PRUNING HERE (e.g., pruning the bottom 10% of weights)
+        # ==========================================================
+        prune_model_weights(vllm_model, prune_percent=50.0)
+        # ==========================================================
 
         self.model = _VllmRunner(vllm_model)
         params_and_buffers = shard_model_to_tpu(self.model, self.mesh)
