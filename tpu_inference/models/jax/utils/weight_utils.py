@@ -60,27 +60,67 @@ DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.float32): torch.uint32,
 }
 
-def apply_1of4_sparsity(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+#def apply_1of4_sparsity_torch(tensor: torch.Tensor) -> torch.Tensor:
+#    """Applies 1:4 structured sparsity along the inner/reduction dimension (dim=-1)."""
+#    original_shape = tensor.shape
+#    # For HF Linear layers, weight layout is usually (out_features, in_features).
+#    # Prune along the contracting dimension (dim=-1).
+#    reshaped = tensor.reshape(-1, 4)
+#    
+#    max_indices = torch.argmax(torch.abs(reshaped), dim=-1, keepdim=True)
+#    mask = torch.zeros_like(reshaped, dtype=torch.bool)
+#    mask.scatter_(dim=-1, index=max_indices, value=True)
+#    
+#    sparse_reshaped = reshaped * mask
+#    return sparse_reshaped.reshape(original_shape)
+
+import time
+
+def apply_1of4_sparsity_torch(tensor: torch.Tensor, param_name: str = "Unknown") -> torch.Tensor:
+    """Applies 1:4 structured sparsity along the inner/reduction dimension (dim=-1).
+    
+    Logs the number of pruned elements and execution time.
     """
-    Applies 1:4 structured sparsity along the inner/reduction dimension (dim=-1).
-    Returns the sparse tensor and the corresponding selection mask.
-    """
+    start_time = time.perf_counter()
     original_shape = tensor.shape
-    # Reshape so that the last dimension is split into blocks of 4
+    total_elements = tensor.numel()
+    
+    # Reshape the last dimension into blocks of 4
     reshaped = tensor.reshape(-1, 4)
     
-    # Identify the index of the maximum absolute value in each block of 4
+    # Track the index of the maximum absolute value in each block of 4
     max_indices = torch.argmax(torch.abs(reshaped), dim=-1, keepdim=True)
     
-    # Create a mask selecting only the maximum value
+    # Create mask to select only the top-1 element out of 4
     mask = torch.zeros_like(reshaped, dtype=torch.bool)
     mask.scatter_(dim=-1, index=max_indices, value=True)
     
-    # Zero out the other 3 elements
+    # Zero out the other 3 elements in each block
     sparse_reshaped = reshaped * mask
     
-    return sparse_reshaped.view(original_shape), mask.view(original_shape)
-
+    # Calculate exact statistics
+    # Since we select exactly 1 out of 4, we prune exactly 75% of the elements
+    pruned_count = total_elements - mask.sum().item()
+    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+    
+    # Print and Log the statistics
+    log_message = (
+        f"--- Sparsification Report ---\n"
+        f"Weight Tensor: {param_name}\n"
+        f"Original Shape: {list(original_shape)}\n"
+        f"Total Elements: {total_elements:,}\n"
+        f"Pruned Elements: {pruned_count:,} ({pruned_count / total_elements * 100.0:.2f}% pruned)\n"
+        f"Time Elapsed: {elapsed_ms:.2f} ms\n"
+        f"-----------------------------"
+    )
+    
+    # Print to stdout
+    print(log_message, flush=True)
+    # Log to vLLM logger
+    logger.info(log_message)
+    
+    return sparse_reshaped.reshape(original_shape)
+    
 @dataclass
 class MetadataMap:
     name_map: dict[str, str] = field(default_factory=dict)

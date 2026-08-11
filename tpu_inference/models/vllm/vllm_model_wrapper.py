@@ -276,7 +276,7 @@ class VllmModelWrapper:
         # ==========================================================
         # INJECT PRUNING HERE (e.g., pruning the bottom 10% of weights)
         # ==========================================================
-        prune_model_weights(vllm_model, prune_percent=50.0)
+        # prune_model_weights(vllm_model, prune_percent=50.0)
         # ==========================================================
 
         self.model = _VllmRunner(vllm_model)
