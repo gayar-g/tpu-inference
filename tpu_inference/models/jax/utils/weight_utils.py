@@ -48,6 +48,7 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 from tpu_inference.utils import t2j
+from transformers import AutoModelForCausalLM
 
 logger = init_logger(__name__)
 
@@ -59,6 +60,26 @@ DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.float32): torch.uint32,
 }
 
+def apply_1of4_sparsity(tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Applies 1:4 structured sparsity along the inner/reduction dimension (dim=-1).
+    Returns the sparse tensor and the corresponding selection mask.
+    """
+    original_shape = tensor.shape
+    # Reshape so that the last dimension is split into blocks of 4
+    reshaped = tensor.reshape(-1, 4)
+    
+    # Identify the index of the maximum absolute value in each block of 4
+    max_indices = torch.argmax(torch.abs(reshaped), dim=-1, keepdim=True)
+    
+    # Create a mask selecting only the maximum value
+    mask = torch.zeros_like(reshaped, dtype=torch.bool)
+    mask.scatter_(dim=-1, index=max_indices, value=True)
+    
+    # Zero out the other 3 elements
+    sparse_reshaped = reshaped * mask
+    
+    return sparse_reshaped.view(original_shape), mask.view(original_shape)
 
 @dataclass
 class MetadataMap:
@@ -815,6 +836,20 @@ def load_nnx_param_from_reshaped_torch(
         reshape_dims: Optional tuple specifying the shape to reshape the torch weight to before permutation. If None, no reshaping is applied.
         permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
     """
+
+    # -------------------------------------------------------------------------
+    # HOOK: Apply 1:4 structured sparsity to selected projections
+    # -------------------------------------------------------------------------
+    target_projections = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
+    if any(proj in param_name for proj in target_projections):
+        if torch_weight.shape[-1] % 4 == 0:
+            torch_weight = apply_1of4_sparsity_torch(torch_weight)
+        else:
+            logger.warning(
+                f"Sparsity skipped for {param_name}: dim {torch_weight.shape[-1]} not divisible by 4."
+            )
+    # -------------------------------------------------------------------------
+
     try:
         jax_weight = jax_array_from_reshaped_torch(torch_weight,
                                                    reshape_dims=reshape_dims,
