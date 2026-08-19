@@ -881,7 +881,7 @@ def load_nnx_param_from_reshaped_torch(
     # HOOK: Apply 1:4 structured sparsity to selected projections
     # -------------------------------------------------------------------------
     target_projections = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
-    if any(proj in param_name for proj in target_projections):
+    if os.environ.get("ENABLE_INLINE_1OF4_SPARSITY", "0") == "1" and any(proj in param_name for proj in target_projections):
         if torch_weight.shape[-1] % 4 == 0:
             torch_weight = apply_1of4_sparsity_torch(torch_weight)
         else:
