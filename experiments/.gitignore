@@ -2,3 +2,7 @@ results/
 *.csv
 *.log
 scratch/
+plot_scripts/
+plots/
+run_master_repeat_sweeps.py
+scripts/

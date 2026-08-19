@@ -1,56 +1,195 @@
-# Baseline v2 Benchmarking Suite
+# TPU Inference & Structured Sparsity Benchmarking Suite
 
-This is an automated performance evaluation framework for parameter sweeps on vLLM and TPU-Inference.
+An automated, modular performance and accuracy evaluation framework for Large Language Models running on Google Cloud TPU v6e / v5e using vLLM and JAX.
 
-## Overview
-This orchestrator tests both pure generation endpoints and sequence decodes across massive parameter matrices (batch sizes, input context lengths). 
+---
 
-## Architecture
-- `run_sweep_orchestrator.py`: The master sequencer. Reads configuration files and iteratively launches isolated benchmarking processes for every matrix dimension.
-- `tpu_profile_vllm.py`: The single-instance benchmarking script. Generates mock input tokens, spins up the vLLM engine, fires the request, cleanly exits, and appends the metric data directly into partitioned `results/` CSVs.
-- `configs/`: Contains configuration dictionaries mapping model bounds and parameter matrices.
-- `results`: Where results will be stored 
+## 1. System Architecture
 
-## Features
-- Avoids cross-run OOM fragmentation by cleanly isolating TPU processes per test.
-- Automatically handles TPU lockfiles and XLA graph compilation overlaps.
-- Skips previously completed operations if crash recovery is needed.
+The architecture adheres strictly to **SOLID design principles**, separating parameter grid generation, dynamic model resolution/splicing, polymorphic runner execution, and metric persistence.
 
-## Quickstart Guide
+```
+                                  ┌────────────────────────────────┐
+                                  │   run_sweep_orchestrator.py    │
+                                  │   (Cartesian Grid Sequencer)   │
+                                  └───────────────┬────────────────┘
+                                                  │
+                  ┌───────────────────────────────┴───────────────────────────────┐
+                  ▼                                                               ▼
+  ┌────────────────────────────────┐                             ┌────────────────────────────────┐
+  │      ResolverRegistry          │                             │         RunnerRegistry         │
+  │────────────────────────────────│                             │────────────────────────────────│
+  │ • SparseGptResolver            │                             │ • TpuEvalRunner (lm_eval)      │
+  │ • NaiveMagnitudeResolver       │                             │ • TpuProfileRunner (throughput)│
+  │ • WeightScalerResolver         │                             └────────────────┬───────────────┘
+  └───────────────┬────────────────┘                                              │
+                  │ (resolves checkpoint path)                                    │ (executes benchmark)
+                  ▼                                                               ▼
+  ┌────────────────────────────────┐                             ┌────────────────────────────────┐
+  │   Model Splicer & Pruners      │                             │     vLLM on Cloud TPU v6e      │
+  │────────────────────────────────│                             │────────────────────────────────│
+  │ • Cross-Shard ModelSplicer     │                             │ • 4-way Tensor Parallelism     │
+  │ • TPU JAX SparseGPT Kernel     │                             │ • Batched RPA PagedAttention   │
+  │ • Naive N:M Magnitude Pruner   │                             │ • FP8 KV Cache + bfloat16      │
+  └────────────────────────────────┘                             └────────────────┬───────────────┘
+                                                                                  │
+                                                                                  ▼
+                                                                 ┌────────────────────────────────┐
+                                                                 │       CsvResultRecorder        │
+                                                                 │   (results/<timestamp>/results.csv)
+                                                                 └────────────────────────────────┘
+```
 
-You can run these examples directly on the TPU VM after activating your vLLM environment (e.g., `source /mnt/pd/shen/vllm_env/bin/activate`).
+---
 
-### 1. Run a Single Individual Benchmark
-If you just want to test a single configuration quickly without a YAML setup, use the underlying benchmarking script directly. 
+## 2. Directory Structure
 
-This command initializes a Gemma 4 model on 4 TPU cores, feeds it a 1024-token context, generates 128 tokens at a batch size of 4, and logs the throughput:
+```
+experiments/
+├── configs/                  # YAML configurations for sweeps and benchmark runs
+├── core/                     # Core interfaces, dataclasses, engine builders, and recorders
+│   ├── interfaces.py         # IRunner, IModelResolver, IResultRecorder, ISparsityEngine
+│   ├── models.py             # ExecutionContext, BenchmarkResult, ModelArchitectureSpec
+│   ├── engine_builder.py     # vLLM kwargs builder and TPU environment setup
+│   └── csv_recorder.py       # Dynamic schema-evolving CSV logger
+├── resolvers/                # Dynamic checkpoint resolvers and layer transformers
+│   ├── base_sparsity_resolver.py # Unified base class for sparsity resolvers
+│   ├── sparsegpt_resolver.py     # SparseGPT Hessian-based resolver
+│   ├── naive_magnitude_resolver.py # Data-free magnitude pruning resolver
+│   ├── weight_scaler_resolver.py # Constant scalar multiplier (c * W) resolver
+│   ├── model_splicer.py          # Cross-shard zero-recompute safetensors layer splicer
+│   └── registry.py               # Central resolver factory
+├── runners/                  # Benchmark execution engines
+│   ├── eval_runner.py        # Accuracy evaluation runner (MMLU-Pro via lm_eval)
+│   ├── profile_runner.py     # Latency & throughput profiling runner
+│   ├── tpu_eval_vllm.py      # Standalone CLI evaluation script
+│   ├── tpu_profile_vllm.py   # Standalone CLI profiling script
+│   └── registry.py           # Central runner factory
+├── sparsity/                 # Structured sparsity algorithms and TPU kernels
+│   ├── tpu_sparsegpt.py      # JAX-accelerated SparseGPT kernel on TPU MXUs
+│   ├── naive_magnitude_pruner.py # Vectorized N:M magnitude pruner (dim=-1)
+│   └── gemma4.py             # Gemma 4 layer capture and Hessian orchestrator
+├── run_sweep_orchestrator.py # Master sweep orchestrator
+├── run_master_repeat_sweeps.py # Multi-experiment sequential runner
+└── README.md
+```
+
+---
+
+## 3. How to Sparsify Models Directly (Without `run_sweep_orchestrator`)
+
+You can create 2:4 or 1:4 structured sparse checkpoints standalone without running a parameter sweep.
+
+### A. TPU-Accelerated SparseGPT Pruning (Hessian-Compensated)
+Runs second-order error-compensated pruning using calibration data (e.g. C4 dataset) directly on TPU Matrix Multiply Units:
+
+```python
+from sparsity import prune_gemma4
+
+prune_gemma4(
+    model_path="/mnt/pd/huggingface_cache/hub/models--google--gemma-4-31B-it/snapshots/842da3794eaa0b77d5f08bae87a17459d91ff475",
+    dataset="c4",
+    nsamples=256,              # Number of calibration sequences
+    prunen=2,                  # N in N:M (2 for 2:4, 1 for 1:4)
+    prunem=4,                  # M in N:M
+    minlayer=0,                # Start layer index
+    maxlayer=60,               # End layer index
+    save_path="/mnt/pd/sparse_checkpoints/my_gemma4_2of4_256c4_full"
+)
+```
+
+### B. Standalone Naive Magnitude Pruning (Data-Free)
+Applies top-K magnitude pruning along the contracting dimension (dim=-1) across all linear projection weights without calibration:
+
 ```bash
-python3 tpu_profile_vllm.py \
-  --model google/gemma-4-12b-it \
+python3 sparsity/naive_magnitude_pruner.py \
+  --model /mnt/pd/huggingface_cache/hub/models--google--gemma-4-31B-it/snapshots/842da3794eaa0b77d5f08bae87a17459d91ff475 \
+  --save /mnt/pd/sparse_checkpoints/my_gemma4_2of4_magnitude_full \
+  --prunen 2 \
+  --prunem 4 \
+  --minlayer 0 \
+  --maxlayer 60
+```
+
+### C. Standalone Cross-Shard Layer Splicing
+Splices specific layers from a 100% sparse reference model into a dense base model in seconds using `safe_open` zero-recompute streaming:
+
+```python
+from resolvers.model_splicer import ModelSplicer
+
+splicer = ModelSplicer()
+splicer.splice_checkpoint(
+    dense_model_dir="/mnt/pd/huggingface_cache/hub/models--google--gemma-4-31B-it/snapshots/842da3794eaa0b77d5f08bae87a17459d91ff475",
+    fully_sparse_model_dir="/mnt/pd/sparse_checkpoints/gemma4_31b_2of4_256c4_full",
+    sparse_layer_indices={0, 1, 2, 3, 4, 5, 6, 7, 8, 9},  # Splice first 10 layers
+    output_dir="/mnt/pd/sparse_checkpoints/gemma4_spliced_10_layers"
+)
+```
+
+### D. Standalone Constant Weight Scaling ($W \leftarrow c \cdot W$)
+Scales only the 2D linear projection weights of a sparse model by a constant multiplier $c$ (e.g. $c = 1.10$):
+
+```python
+from resolvers.weight_scaler_resolver import WeightScalerResolver
+
+resolver = WeightScalerResolver()
+resolver._scale_checkpoint(
+    base_checkpoint="/mnt/pd/sparse_checkpoints/gemma4_31b_2of4_256c4_full",
+    output_dir="/mnt/pd/sparse_checkpoints/gemma4_2of4_scaled_c1p100",
+    scale_factor=1.10
+)
+```
+
+---
+
+## 4. How to Run Sparse Models with vLLM on Cloud TPU
+
+### A. Run Quality / Accuracy Evaluation (MMLU-Pro)
+Evaluates any dense, sparse, or spliced checkpoint on MMLU-Pro via the `lm-evaluation-harness` across 4 TPU cores:
+
+```bash
+python3 runners/tpu_eval_vllm.py \
+  --model /mnt/pd/sparse_checkpoints/gemma4_31b_2of4_256c4_full \
+  --tasks mmlu_pro \
+  --limit 0.05 \
+  --tensor-parallel-size 4 \
+  --dtype bfloat16 \
+  --batch-size auto \
+  --max-model-len 8192 
+
+```
+
+### B. Run Throughput & Latency Profiling
+Measures generation throughput (tokens/second) and latency on TPU v6e:
+
+```bash
+python3 runners/tpu_profile_vllm.py \
+  --model /mnt/pd/sparse_checkpoints/gemma4_31b_2of4_256c4_full \
   --input-len 1024 \
   --output-len 128 \
   --batch-size 4 \
   --tensor-parallel-size 4 \
-  --dtype bfloat16 \
-  --max-model-len 200000
+  --max-model-len 8192 \
+  --dtype bfloat16
 ```
 
-### 2. Run a Full Parameter Sweep
-If you want to run an automated grid search (e.g., testing how throughput scales as context size grows), use the orchestrator script with one of the provided configs. 
+---
 
-This command reads `configs/1_prefill_sweep.yaml` and iteratively launches the single benchmark script for every combination of parameters defined in the matrix, saving all data into a timestamped CSV folder in `results/`:
+## 5. How to Run Automated Sweeps
+
+To execute a complete multi-coordinate parameter sweep (e.g. evaluating 0, 5, 10, 20, 30, 40, 50, 60 sparse layers):
+
 ```bash
-python3 run_sweep_orchestrator.py --config configs/1_prefill_sweep.yaml
+python3 run_sweep_orchestrator.py --config configs/6_sparsity_front_to_back_2of4_mmlu_pro_eval_fast.yaml
 ```
 
-**View Results:**
-After the sweep finishes (or while it's running), check the latest timestamped folder in the results directory:
+**View Live Results:**
 ```bash
 cat results/*/results.csv
 ```
 
 **Resume an Interrupted Sweep:**
-If an execution crashed (e.g. out of memory on a massive configuration), explicitly pass the failed directory's timestamp. It will safely skip combinations that are already logged in the CSV and resume where it left off:
+If a sweep was stopped or preempted, pass the previous experiment ID to resume without re-running finished coordinates:
 ```bash
-python3 run_sweep_orchestrator.py --config configs/1_prefill_sweep.yaml --experiment-id 20261111_001020
+python3 run_sweep_orchestrator.py --config configs/6_sparsity_front_to_back_2of4_mmlu_pro_eval_fast.yaml --experiment-id 20260819_183746
 ```
