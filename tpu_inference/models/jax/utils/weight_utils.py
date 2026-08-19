@@ -48,7 +48,6 @@ from tpu_inference.layers.jax.quantization import QuantizeMethodBase
 from tpu_inference.logger import init_logger
 from tpu_inference.models.jax.utils import file_utils
 from tpu_inference.utils import t2j
-from transformers import AutoModelForCausalLM
 
 logger = init_logger(__name__)
 
@@ -60,67 +59,7 @@ DTYPE_VIEW_MAP = {
     jnp.dtype(jnp.float32): torch.uint32,
 }
 
-#def apply_1of4_sparsity_torch(tensor: torch.Tensor) -> torch.Tensor:
-#    """Applies 1:4 structured sparsity along the inner/reduction dimension (dim=-1)."""
-#    original_shape = tensor.shape
-#    # For HF Linear layers, weight layout is usually (out_features, in_features).
-#    # Prune along the contracting dimension (dim=-1).
-#    reshaped = tensor.reshape(-1, 4)
-#    
-#    max_indices = torch.argmax(torch.abs(reshaped), dim=-1, keepdim=True)
-#    mask = torch.zeros_like(reshaped, dtype=torch.bool)
-#    mask.scatter_(dim=-1, index=max_indices, value=True)
-#    
-#    sparse_reshaped = reshaped * mask
-#    return sparse_reshaped.reshape(original_shape)
 
-import time
-
-def apply_1of4_sparsity_torch(tensor: torch.Tensor, param_name: str = "Unknown") -> torch.Tensor:
-    """Applies 1:4 structured sparsity along the inner/reduction dimension (dim=-1).
-    
-    Logs the number of pruned elements and execution time.
-    """
-    start_time = time.perf_counter()
-    original_shape = tensor.shape
-    total_elements = tensor.numel()
-    
-    # Reshape the last dimension into blocks of 4
-    reshaped = tensor.reshape(-1, 4)
-    
-    # Track the index of the maximum absolute value in each block of 4
-    max_indices = torch.argmax(torch.abs(reshaped), dim=-1, keepdim=True)
-    
-    # Create mask to select only the top-1 element out of 4
-    mask = torch.zeros_like(reshaped, dtype=torch.bool)
-    mask.scatter_(dim=-1, index=max_indices, value=True)
-    
-    # Zero out the other 3 elements in each block
-    sparse_reshaped = reshaped * mask
-    
-    # Calculate exact statistics
-    # Since we select exactly 1 out of 4, we prune exactly 75% of the elements
-    pruned_count = total_elements - mask.sum().item()
-    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
-    
-    # Print and Log the statistics
-    log_message = (
-        f"--- Sparsification Report ---\n"
-        f"Weight Tensor: {param_name}\n"
-        f"Original Shape: {list(original_shape)}\n"
-        f"Total Elements: {total_elements:,}\n"
-        f"Pruned Elements: {pruned_count:,} ({pruned_count / total_elements * 100.0:.2f}% pruned)\n"
-        f"Time Elapsed: {elapsed_ms:.2f} ms\n"
-        f"-----------------------------"
-    )
-    
-    # Print to stdout
-    print(log_message, flush=True)
-    # Log to vLLM logger
-    logger.info(log_message)
-    
-    return sparse_reshaped.reshape(original_shape)
-    
 @dataclass
 class MetadataMap:
     name_map: dict[str, str] = field(default_factory=dict)
@@ -876,20 +815,6 @@ def load_nnx_param_from_reshaped_torch(
         reshape_dims: Optional tuple specifying the shape to reshape the torch weight to before permutation. If None, no reshaping is applied.
         permute_dims: Optional tuple specifying the permutation of dimensions. If None, no-op for 1D tensors and transpose for 2D tensors is applied.
     """
-
-    # -------------------------------------------------------------------------
-    # HOOK: Apply 1:4 structured sparsity to selected projections
-    # -------------------------------------------------------------------------
-    target_projections = ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"]
-    if os.environ.get("ENABLE_INLINE_1OF4_SPARSITY", "0") == "1" and any(proj in param_name for proj in target_projections):
-        if torch_weight.shape[-1] % 4 == 0:
-            torch_weight = apply_1of4_sparsity_torch(torch_weight)
-        else:
-            logger.warning(
-                f"Sparsity skipped for {param_name}: dim {torch_weight.shape[-1]} not divisible by 4."
-            )
-    # -------------------------------------------------------------------------
-
     try:
         jax_weight = jax_array_from_reshaped_torch(torch_weight,
                                                    reshape_dims=reshape_dims,

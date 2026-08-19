@@ -7,18 +7,20 @@ PyTorch model inspection and layer traversal utilities for extracting linear pro
 import torch
 import torch.nn as nn
 
-DEV = torch.device(cuda:0 if torch.cuda.is_available() else cpu)
+DEV = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-def find_layers(module, layers=[nn.Conv2d, nn.Linear], name=):
+def find_layers(module, layers=None, name=""):
     """
     Recursively scans a PyTorch nn.Module hierarchy and returns a flat dictionary
     mapping dot-separated layer names to their corresponding target submodules (e.g. nn.Linear).
     """
+    if layers is None:
+        layers = [nn.Conv2d, nn.Linear]
     if type(module) in layers:
         return {name: module}
     res = {}
     for name1, child in module.named_children():
         res.update(find_layers(
-            child, layers=layers, name=name + . + name1 if name !=  else name1
+            child, layers=layers, name=name + "." + name1 if name != "" else name1
         ))
     return res
