@@ -54,7 +54,7 @@ class BaseSparsityResolver(BaseResolver):
         max_layer: int,
         resolver_config: Dict[str, Any]
     ) -> str:
-        calib_tag = f"_{resolver_config[nsamples]}c4" if "nsamples" in resolver_config else ""
+        calib_tag = f"_{resolver_config.get('nsamples')}c4" if "nsamples" in resolver_config else ""
         return f"{arch_type}_{self.METHOD_NAME}_{prunen}of{prunem}{calib_tag}_{strategy}_layers_{min_layer}_to_{max_layer}"
 
     def prune_in_memory(
